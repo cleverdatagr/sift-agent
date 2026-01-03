@@ -22,24 +22,32 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Service definition
+// program implements the service.Interface
 type program struct{}
 
 func (p *program) Start(s service.Service) error {
-	// Start the actual work in a non-blocking way
 	go p.run()
 	return nil
 }
 
 func (p *program) Stop(s service.Service) error {
-	// Cleanup logic here
 	return nil
 }
 
 func (p *program) run() {
-	// This is where the actual "Run" command logic will eventually live
-	// For now, we just redirect to the run command logic
 	RunAgent()
+}
+
+func getService(configPath string) (service.Service, error) {
+	svcConfig := &service.Config{
+		Name:        "SiftAgent",
+		DisplayName: "Sift Intelligent Document Agent",
+		Description: "Watches configured folders and uploads documents to Sift IDP.",
+		Arguments:   []string{"run", "--config", configPath},
+	}
+
+	prg := &program{}
+	return service.New(prg, svcConfig)
 }
 
 var installCmd = &cobra.Command{
@@ -53,16 +61,7 @@ var installCmd = &cobra.Command{
 			return
 		}
 
-		svcConfig := &service.Config{
-			Name:        "SiftAgent",
-			DisplayName: "Sift Intelligent Document Agent",
-			Description: "Watches configured folders and uploads documents to Sift IDP.",
-			// Arguments to pass to the service when it starts
-			Arguments: []string{"run", "--config", configPath},
-		}
-
-		prg := &program{}
-		s, err := service.New(prg, svcConfig)
+		s, err := getService(configPath)
 		if err != nil {
 			fmt.Printf("Setup failed: %v\n", err)
 			return

@@ -24,13 +24,18 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/go-resty/resty/v2"
+	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 // RunAgent is the entry point for the long-running process
 func RunAgent() {
-	fmt.Println("Sift Agent Starting...")
+	if service.Interactive() {
+		fmt.Println("Sift Agent Starting...")
+	} else {
+		log.Println("Sift Agent Starting as Service...")
+	}
 
 	// reload config just in case
 	if err := viper.ReadInConfig(); err != nil {
@@ -247,7 +252,16 @@ var runCmd = &cobra.Command{
 	Short: "Run the agent in the foreground (Internal Use)",
 	Long:  `Runs the watcher process directly. Usually invoked by the Windows Service.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		RunAgent()
+		if service.Interactive() {
+			RunAgent()
+		} else {
+			// When running as a service, we MUST call s.Run() to check-in with Windows SCM
+			s, err := getService(viper.ConfigFileUsed())
+			if err != nil {
+				log.Fatalf("Failed to initialize service: %v", err)
+			}
+			s.Run()
+		}
 	},
 }
 

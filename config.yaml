@@ -1,0 +1,5 @@
+remotes:
+    - name: office
+      path: C:\Users\s413855\source\repos\docuclass\sift-agent\scans
+      endpoint: http://localhost/api/v1
+      key: sift_live_istos-metafores_X-Q7W5vm_8dZ7zOnMUzufXsX0zm7onEABdsbPIj9zK4
