@@ -203,7 +203,28 @@ func handleUpload(remote RemoteConfig, filePath string) {
 	}
 
 	if (status == StatusUploaded || status == StatusVerified) && dbModTime == info.ModTime().UnixNano() {
-		log.Printf("[%s] Skipping %s: Already uploaded and unchanged.", remote.Name, filepath.Base(filePath))
+		// --- SELF-HEALING MOVE ---
+		// The file was already uploaded successfully, but it's still here.
+		// This happens if the move to .done failed (e.g. file locked by HTTP handle).
+		// We try to move it now. If it fails again, we just skip and let next scan try.
+		log.Printf("[%s] %s already processed. Attempting cleanup move...", remote.Name, filepath.Base(filePath))
+		
+		doneDir := filepath.Join(filepath.Dir(filePath), ".done")
+		if _, err := os.Stat(doneDir); os.IsNotExist(err) {
+			os.Mkdir(doneDir, 0755)
+		}
+		
+		destPath := filepath.Join(doneDir, filepath.Base(filePath))
+		if _, err := os.Stat(destPath); err == nil {
+			timestamp := time.Now().Format("20060102150405")
+			destPath = filepath.Join(doneDir, fmt.Sprintf("%s_%s", timestamp, filepath.Base(filePath)))
+		}
+
+		if err := os.Rename(filePath, destPath); err == nil {
+			log.Printf("[%s] ✅ Cleanup move successful: %s", remote.Name, filepath.Base(filePath))
+		} else {
+			log.Printf("[%s] ⚠️ Cleanup move failed (Busy): %s", remote.Name, filepath.Base(filePath))
+		}
 		return
 	}
 
