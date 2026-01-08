@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -38,26 +39,33 @@ var dbInstance *sql.DB
 func initDB() {
 	var dbPath string
 
-	// Check Config/Viper first
+	// 1. Explicit Config override
 	if viper.IsSet("db_path") {
 		dbPath = viper.GetString("db_path")
-		// Ensure directory exists
 		if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-			log.Fatalf("Failed to create db directory: %v", err)
+			log.Fatalf("Error: Failed to create database directory at %s: %v", filepath.Dir(dbPath), err)
 		}
+	} else if localMode {
+		// 2. Local Mode: Next to EXE
+		exePath, err := os.Executable()
+		if err != nil {
+			log.Fatal("Error: Could not determine executable path")
+		}
+		dbPath = filepath.Join(filepath.Dir(exePath), "state.db")
 	} else {
-		// Fallback to Standard OS Paths
-		// Windows: %PROGRAMDATA%\CleverData\SiftAgent
-		// Linux: /var/lib/sift-agent
+		// 3. Global Mode: ProgramData or /var/lib
 		var dataDir string
 		if os.Getenv("OS") == "Windows_NT" {
-			dataDir = filepath.Join(os.Getenv("ProgramData"), "CleverData", "SiftAgent")
+			dataDir = filepath.Join(os.Getenv("ProgramData"), "Sift")
 		} else {
 			dataDir = "/var/lib/sift-agent"
 		}
 
+		// Strictly enforce the directory exists or can be created
 		if err := os.MkdirAll(dataDir, 0755); err != nil {
-			log.Fatalf("Failed to create data directory: %v", err)
+			fmt.Printf("Error: Could not create data directory at %s\n", dataDir)
+			fmt.Println("Hint: Run as Administrator or use --local for development.")
+			os.Exit(1)
 		}
 		dbPath = filepath.Join(dataDir, "state.db")
 	}

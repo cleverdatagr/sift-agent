@@ -17,7 +17,6 @@ package cmd
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -33,29 +32,51 @@ import (
 	"github.com/spf13/viper"
 )
 
-// RunAgent is the entry point for the long-running process
 func RunAgent() {
-	initDB() // Initialize SQLite
+	initConfig() // Ensure config is loaded (Critical for Service mode)
+	initDB()     // Initialize SQLite
 
-	if service.Interactive() {
-		fmt.Println("Sift Agent Starting...")
-	} else {
-		log.Println("Sift Agent Starting as Service...")
+	// Setup System Logger (Event Viewer on Windows)
+	svcConfig := &service.Config{Name: "SiftAgent"}
+	prg := &program{}
+	s, err := service.New(prg, svcConfig)
+	var logger service.Logger
+	if err == nil {
+		logger, _ = s.Logger(nil)
+	}
+
+	// ALWAYS LOG STARTUP
+	msg := "Sift Agent Starting..."
+	fmt.Println(msg)
+	if logger != nil {
+		logger.Info(msg)
 	}
 
 	// reload config just in case
 	if err := viper.ReadInConfig(); err != nil {
-		log.Printf("Warning: Config not found or invalid: %v", err)
+		warn := fmt.Sprintf("Config not found or invalid: %v", err)
+		fmt.Println(warn)
+		if logger != nil {
+			logger.Warning(warn)
+		}
 	}
 
 	var remotes []RemoteConfig
 	if err := viper.UnmarshalKey("remotes", &remotes); err != nil {
-		log.Printf("Error parsing config: %v", err)
+		err_msg := fmt.Sprintf("Error parsing config: %v", err)
+		fmt.Println(err_msg)
+		if logger != nil {
+			logger.Error(err_msg)
+		}
 		return
 	}
 
 	if len(remotes) == 0 {
-		log.Println("No remotes configured. Idling...")
+		idle := "No remotes configured. Idling..."
+		fmt.Println(idle)
+		if logger != nil {
+			logger.Info(idle)
+		}
 		select {} // Block forever
 	}
 
@@ -67,16 +88,16 @@ func RunAgent() {
 			defer wg.Done()
 			
 			// Start background heartbeat
-			go pinger(r)
+			go pinger(r, logger)
 			
-			watchRemote(r)
+			watchRemote(r, logger)
 		}(remote)
 	}
 
 	wg.Wait()
 }
 
-func pinger(remote RemoteConfig) {
+func pinger(remote RemoteConfig, logger service.Logger) {
 	client := resty.New()
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
@@ -88,19 +109,31 @@ func pinger(remote RemoteConfig) {
 			Get(remote.Endpoint + "/agent/check")
 
 		if err != nil {
-			log.Printf("[%s] Heartbeat failed: %v", remote.Name, err)
+			if logger != nil {
+				logger.Warningf("[%s] Heartbeat failed: %v", remote.Name, err)
+			}
 		} else if resp.StatusCode() != 200 {
-			log.Printf("[%s] Heartbeat rejected: Status %d", remote.Name, resp.StatusCode())
+			if logger != nil {
+				logger.Warningf("[%s] Heartbeat rejected: Status %d", remote.Name, resp.StatusCode())
+			}
 		}
 	}
 }
 
-func watchRemote(remote RemoteConfig) {
-	log.Printf("[%s] Starting watcher on: %s", remote.Name, remote.Path)
+func watchRemote(remote RemoteConfig, logger service.Logger) {
+	msg := fmt.Sprintf("[%s] Starting watcher on: %s", remote.Name, remote.Path)
+	fmt.Println(msg)
+	if logger != nil {
+		logger.Info(msg)
+	}
 
 	// Ensure directory exists
 	if _, err := os.Stat(remote.Path); os.IsNotExist(err) {
-		log.Printf("[%s] Directory does not exist, creating: %s", remote.Name, remote.Path)
+		msg := fmt.Sprintf("[%s] Creating directory: %s", remote.Name, remote.Path)
+		fmt.Println(msg)
+		if logger != nil {
+			logger.Info(msg)
+		}
 		os.MkdirAll(remote.Path, 0755)
 	}
 
@@ -110,15 +143,25 @@ func watchRemote(remote RemoteConfig) {
 		for _, file := range files {
 			if !file.IsDir() && filepath.Base(file.Name())[0] != '.' {
 				fullPath := filepath.Join(remote.Path, file.Name())
-				log.Printf("[%s] Found existing file: %s", remote.Name, file.Name())
-				go handleUpload(remote, fullPath)
+				// Ensure absolute path
+				absPath, _ := filepath.Abs(fullPath)
+				msg := fmt.Sprintf("[%s] Found existing file: %s", remote.Name, file.Name())
+				fmt.Println(msg)
+				if logger != nil {
+					logger.Info(msg)
+				}
+				go handleUpload(remote, absPath, logger)
 			}
 		}
 	}
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		log.Printf("[%s] Error creating watcher: %v", remote.Name, err)
+		err_msg := fmt.Sprintf("[%s] Error creating watcher: %v", remote.Name, err)
+		fmt.Println(err_msg)
+		if logger != nil {
+			logger.Error(err_msg)
+		}
 		return
 	}
 	defer watcher.Close()
@@ -127,7 +170,6 @@ func watchRemote(remote RemoteConfig) {
 
 	// Processing Loop
 	go func() {
-		// Dedup/Debounce map: filename -> timer
 		pendingUploads := make(map[string]*time.Timer)
 		var mu sync.Mutex
 
@@ -138,28 +180,24 @@ func watchRemote(remote RemoteConfig) {
 					return
 				}
 
-				// Only care about Create and Write
 				if event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write {
-					
-					// Ignore hidden files or temp files if needed
 					if filepath.Base(event.Name)[0] == '.' {
 						continue
 					}
 
 					mu.Lock()
-					// If timer exists, stop it (reset debounce)
 					if t, exists := pendingUploads[event.Name]; exists {
 						t.Stop()
 					}
 
-					// Start new timer (Stabilization Window: 1 second)
-					// If no new write events happen for 1s, we assume file is ready.
 					pendingUploads[event.Name] = time.AfterFunc(1*time.Second, func() {
 						mu.Lock()
 						delete(pendingUploads, event.Name)
 						mu.Unlock()
 						
-						handleUpload(remote, event.Name)
+						// Ensure absolute path
+						absPath, _ := filepath.Abs(event.Name)
+						handleUpload(remote, absPath, logger)
 					})
 					mu.Unlock()
 				}
@@ -168,24 +206,27 @@ func watchRemote(remote RemoteConfig) {
 				if !ok {
 					return
 				}
-				log.Printf("[%s] Watcher error: %v", remote.Name, err)
+				if logger != nil {
+					logger.Errorf("[%s] Watcher error: %v", remote.Name, err)
+				}
 			}
 		}
 	}()
 
 	if err := watcher.Add(remote.Path); err != nil {
-		log.Printf("[%s] Failed to add path: %v", remote.Name, err)
+		if logger != nil {
+			logger.Errorf("[%s] Failed to add path: %v", remote.Name, err)
+		}
 		return
 	}
 
 	<-done
 }
 
-func handleUpload(remote RemoteConfig, filePath string) {
-	// Verify file exists and is accessible
+func handleUpload(remote RemoteConfig, filePath string, logger service.Logger) {
+	// filePath is already absolute from the caller
 	info, err := os.Stat(filePath)
 	if err != nil {
-		log.Printf("[%s] File vanished before upload: %s", remote.Name, filePath)
 		return
 	}
 
@@ -193,22 +234,17 @@ func handleUpload(remote RemoteConfig, filePath string) {
 		return
 	}
 
-	// DB Check: Has this file been uploaded?
-	// We check ModTime. If ModTime in DB matches File, and Status is UPLOADED or VERIFIED, skip.
 	status, dbModTime, _, errorCount := getFileRecord(filePath)
 	
 	if errorCount > 10 {
-		log.Printf("[%s] Skipping %s: Too many errors (%d). Manual intervention required.", remote.Name, filepath.Base(filePath), errorCount)
+		if logger != nil {
+			logger.Warningf("[%s] Skipping %s: Too many errors", remote.Name, filepath.Base(filePath))
+		}
 		return
 	}
 
 	if (status == StatusUploaded || status == StatusVerified) && dbModTime == info.ModTime().UnixNano() {
 		// --- SELF-HEALING MOVE ---
-		// The file was already uploaded successfully, but it's still here.
-		// This happens if the move to .done failed (e.g. file locked by HTTP handle).
-		// We try to move it now. If it fails again, we just skip and let next scan try.
-		log.Printf("[%s] %s already processed. Attempting cleanup move...", remote.Name, filepath.Base(filePath))
-		
 		doneDir := filepath.Join(filepath.Dir(filePath), ".done")
 		if _, err := os.Stat(doneDir); os.IsNotExist(err) {
 			os.Mkdir(doneDir, 0755)
@@ -221,110 +257,83 @@ func handleUpload(remote RemoteConfig, filePath string) {
 		}
 
 		if err := os.Rename(filePath, destPath); err == nil {
-			log.Printf("[%s] ✅ Cleanup move successful: %s", remote.Name, filepath.Base(filePath))
-		} else {
-			log.Printf("[%s] ⚠️ Cleanup move failed (Busy): %s", remote.Name, filepath.Base(filePath))
+			if logger != nil {
+				logger.Infof("[%s] Cleanup move successful: %s", remote.Name, filepath.Base(filePath))
+			}
 		}
 		return
 	}
 
-	// Stability Check (Double-Check)
-	// Some scanners create the file, then pause, then write again.
-	// We check if size remains constant for another 500ms.
 	initialSize := info.Size()
 	time.Sleep(500 * time.Millisecond)
 	info2, err := os.Stat(filePath)
 	if err != nil || info2.Size() != initialSize {
-		log.Printf("[%s] File %s is still changing (Size: %d -> %d). Retrying later...", remote.Name, filepath.Base(filePath), initialSize, info2.Size())
-		// Reschedule logic could go here, for now we just skip to avoid partial uploads
 		return
 	}
 
-	log.Printf("[%s] 🚀 Ready to upload: %s (%d bytes)", remote.Name, filepath.Base(filePath), info.Size())
-
-	// Perform HTTP Upload
-	uploadFile(remote, filePath, info.ModTime().UnixNano())
-}
-
-func uploadFile(remote RemoteConfig, filePath string, modTime int64) {
-	client := resty.New()
-	
-	// Prepare destination for "done" files
-	doneDir := filepath.Join(filepath.Dir(filePath), ".done")
-	if _, err := os.Stat(doneDir); os.IsNotExist(err) {
-		os.Mkdir(doneDir, 0755)
+	if logger != nil {
+		logger.Infof("[%s] Uploading: %s", remote.Name, filepath.Base(filePath))
 	}
 
-	// Calculate Local Checksum
-	f, err := os.Open(filePath)
+	uploadFile(remote, filePath, info.ModTime().UnixNano(), logger)
+}
+
+func uploadFile(remote RemoteConfig, filePath string, modTime int64, logger service.Logger) {
+	client := resty.New()
+	
+	absPath, _ := filepath.Abs(filePath)
+	doneDir := filepath.Join(filepath.Dir(absPath), ".done")
+	if _, err := os.Stat(doneDir); os.IsNotExist(err) {
+		err := os.Mkdir(doneDir, 0755)
+		if err != nil && logger != nil {
+			logger.Errorf("[%s] FAILED to create .done directory: %v", remote.Name, err)
+		}
+	}
+
+	f, err := os.Open(absPath)
 	if err != nil {
-		log.Printf("[%s] Read failed: %v", remote.Name, err)
 		return
 	}
 	defer f.Close()
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, f); err != nil {
-		log.Printf("[%s] Hash failed: %v", remote.Name, err)
 		return
 	}
 	localHash := hex.EncodeToString(hasher.Sum(nil))
 
-	// Retry loop
 	maxRetries := 3
 	for i := 0; i < maxRetries; i++ {
 		resp, err := client.R().
 			SetHeader("Authorization", "Bearer " + remote.Key).
-			SetFile("file", filePath).
+			SetFile("file", absPath).
 			Post(fmt.Sprintf("%s/agent/upload", remote.Endpoint))
 
 		if err == nil && resp.StatusCode() >= 200 && resp.StatusCode() < 300 {
+			updateFileStatus(absPath, StatusVerified, localHash, modTime, 0)
 			
-			// Parse Response for Handshake
-			var result map[string]interface{}
-			if err := json.Unmarshal(resp.Body(), &result); err == nil {
-				if remoteHash, ok := result["sha256"].(string); ok {
-					if remoteHash == localHash {
-						log.Printf("[%s] ✅ Integrity Verified: %s", remote.Name, filepath.Base(filePath))
-						updateFileStatus(filePath, StatusVerified, localHash, modTime, 0)
-					} else {
-						log.Printf("[%s] ❌ Integrity MISMATCH: %s (Local: %s, Remote: %s)", remote.Name, filepath.Base(filePath), localHash, remoteHash)
-						markCorrupt(filePath)
-						incrementError(filePath)
-						return // Stop processing this file
-					}
-				} else {
-					// Legacy API support (assume success but weak status)
-					log.Printf("[%s] ⚠️ API did not return checksum. Marking as UPLOADED (Weak).", remote.Name)
-					updateFileStatus(filePath, StatusUploaded, localHash, modTime, 0)
-				}
-			}
-
-			log.Printf("[%s] Upload Success: %s", remote.Name, filepath.Base(filePath))
-			
-			// Move to .done (Best Effort)
-			destPath := filepath.Join(doneDir, filepath.Base(filePath))
-			
-			// Handle collisions in .done
+			destPath := filepath.Join(doneDir, filepath.Base(absPath))
 			if _, err := os.Stat(destPath); err == nil {
 				timestamp := time.Now().Format("20060102150405")
-				destPath = filepath.Join(doneDir, fmt.Sprintf("%s_%s", timestamp, filepath.Base(filePath)))
+				destPath = filepath.Join(doneDir, fmt.Sprintf("%s_%s", timestamp, filepath.Base(absPath)))
 			}
 
-			if err := os.Rename(filePath, destPath); err != nil {
-				log.Printf("[%s] Note: Failed to move file to .done (Permission Denied?). File remains but is marked VERIFIED.", remote.Name)
+			// CLOSE FILE BEFORE RENAME (Windows Requirement)
+			f.Close() 
+
+			if err := os.Rename(absPath, destPath); err != nil {
+				if logger != nil {
+					logger.Errorf("[%s] FAILED to move file to .done: %v", remote.Name, err)
+				}
 			} else {
-				// If moved, we technically should update the DB path, but for now we just leave the original path marked as VERIFIED
-				// so if it reappears there, we know it's a dupe.
+				if logger != nil {
+					logger.Infof("[%s] Success: %s moved to .done", remote.Name, filepath.Base(absPath))
+				}
 			}
 			return
 		}
-
-		log.Printf("[%s] ⚠️ Upload Attempt %d failed: %v (Status: %d). Retrying...", remote.Name, i+1, err, resp.StatusCode())
 		time.Sleep(2 * time.Second)
 	}
-
-	log.Printf("[%s] ❌ Upload Failed after %d attempts: %s", remote.Name, maxRetries, filepath.Base(filePath))
-	incrementError(filePath)
+	incrementError(absPath)
 }
 
 var runCmd = &cobra.Command{

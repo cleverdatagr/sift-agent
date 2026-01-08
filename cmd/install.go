@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"fmt"
+	"os/exec"
 
 	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
@@ -39,11 +40,18 @@ func (p *program) run() {
 }
 
 func getService(configPath string) (service.Service, error) {
+	args := []string{"run"}
+	if localMode {
+		args = append(args, "--local")
+	} else if configPath != "" {
+		args = append(args, "--config", configPath)
+	}
+
 	svcConfig := &service.Config{
 		Name:        "SiftAgent",
 		DisplayName: "Sift Intelligent Document Agent",
 		Description: "Watches configured folders and uploads documents to Sift IDP.",
-		Arguments:   []string{"run", "--config", configPath},
+		Arguments:   args,
 	}
 
 	prg := &program{}
@@ -146,6 +154,52 @@ var restartCmd = &cobra.Command{
 	},
 }
 
+var stopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop the Sift Agent Service",
+	Run: func(cmd *cobra.Command, args []string) {
+		svcConfig := &service.Config{
+			Name: "SiftAgent",
+		}
+		prg := &program{}
+		s, err := service.New(prg, svcConfig)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		fmt.Println("Stopping Sift Agent Service...")
+		if err := s.Stop(); err != nil {
+			fmt.Printf("Failed to stop: %v\n", err)
+			return
+		}
+		fmt.Println("Service stopped.")
+	},
+}
+
+var startCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Start the Sift Agent Service",
+	Run: func(cmd *cobra.Command, args []string) {
+		svcConfig := &service.Config{
+			Name: "SiftAgent",
+		}
+		prg := &program{}
+		s, err := service.New(prg, svcConfig)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		fmt.Println("Starting Sift Agent Service...")
+		if err := s.Start(); err != nil {
+			fmt.Printf("Failed to start: %v\n", err)
+			return
+		}
+		fmt.Println("Service started.")
+	},
+}
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Check the status of the Sift Agent Service",
@@ -178,9 +232,55 @@ var statusCmd = &cobra.Command{
 	},
 }
 
+var enableCmd = &cobra.Command{
+	Use:   "enable",
+	Short: "Enable the Sift Agent to start automatically with Windows",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println("Enabling Sift Agent Service (Automatic Start)...")
+		// We use standard Windows 'sc' command to set start type
+		cmdExec := exec.Command("sc", "config", "SiftAgent", "start=", "auto")
+		if err := cmdExec.Run(); err != nil {
+			fmt.Printf("Failed to enable: %v\n", err)
+			return
+		}
+		fmt.Println("Service enabled for automatic start.")
+	},
+}
+
+var disableCmd = &cobra.Command{
+	Use:   "disable",
+	Short: "Disable the Sift Agent from starting with Windows",
+	Run: func(cmd *cobra.Command, args []string) {
+		svcConfig := &service.Config{
+			Name: "SiftAgent",
+		}
+		prg := &program{}
+		s, err := service.New(prg, svcConfig)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		fmt.Println("Stopping Sift Agent Service...")
+		s.Stop()
+
+		fmt.Println("Disabling Sift Agent Service (Manual Start Only)...")
+		cmdExec := exec.Command("sc", "config", "SiftAgent", "start=", "demand")
+		if err := cmdExec.Run(); err != nil {
+			fmt.Printf("Failed to disable: %v\n", err)
+			return
+		}
+		fmt.Println("Service disabled.")
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(installCmd)
 	rootCmd.AddCommand(uninstallCmd)
 	rootCmd.AddCommand(restartCmd)
+	rootCmd.AddCommand(stopCmd)
+	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(enableCmd)
+	rootCmd.AddCommand(disableCmd)
 }

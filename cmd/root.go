@@ -24,7 +24,8 @@ import (
 )
 
 var cfgFile string
-var Version = "0.1.0" // Default version
+var localMode bool
+var Version = "0.1.1" // Default version
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -43,38 +44,55 @@ func Execute() {
 
 func init() {
 	cobra.OnInitialize(initConfig)
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.sift.yaml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file path")
+	rootCmd.PersistentFlags().BoolVar(&localMode, "local", false, "force use of local directory for config and database")
 }
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
 	if cfgFile != "" {
 		viper.SetConfigFile(cfgFile)
-	} else {
-		// 1. Check local folder (Same as EXE) - Best for Dev
+	} else if localMode {
+		// --- LOCAL MODE: Use EXE folder ---
 		exePath, err := os.Executable()
-		if err == nil {
-			viper.AddConfigPath(filepath.Dir(exePath))
+		if err != nil {
+			fmt.Println("Error: Could not determine executable path")
+			os.Exit(1)
 		}
-
-		// 2. Check Global ProgramData - Standard for Windows Services
-		programData := os.Getenv("PROGRAMDATA")
-		if programData != "" {
-			viper.AddConfigPath(filepath.Join(programData, "Sift"))
-		}
-
-		// 3. Fallback to Home directory (Legacy)
-		home, err := os.UserHomeDir()
-		if err == nil {
-			viper.AddConfigPath(home)
-		}
-
+		viper.AddConfigPath(filepath.Dir(exePath))
 		viper.SetConfigName("config")
 		viper.SetConfigType("yaml")
+	} else {
+		// --- GLOBAL MODE: Use ProgramData (Windows) or /etc (Linux) ---
+		var globalDir string
+		if os.Getenv("OS") == "Windows_NT" {
+			globalDir = filepath.Join(os.Getenv("ProgramData"), "Sift")
+		} else {
+			globalDir = "/etc/sift"
+		}
+
+		// Ensure directory exists
+		if _, err := os.Stat(globalDir); os.IsNotExist(err) {
+			err := os.MkdirAll(globalDir, 0755)
+			if err != nil {
+				fmt.Printf("Error: Could not create global config directory at %s\n", globalDir)
+				fmt.Println("Hint: Run as Administrator or use --local for development.")
+				os.Exit(1)
+			}
+		}
+
+		viper.AddConfigPath(globalDir)
+		viper.SetConfigName("config")
+		viper.SetConfigType("yaml")
+		
+		// If we are in Global Mode but no config exists, we should set the default file path
+		// so that 'viper.WriteConfig()' creates it in the right place.
+		viper.SetConfigFile(filepath.Join(globalDir, "config.yaml"))
 	}
 
 	viper.AutomaticEnv()
 
+	// Only read if it exists
 	if err := viper.ReadInConfig(); err == nil {
 		// If we found one, lock it in so 'viper.WriteConfig()' updates the CORRECT file
 		viper.SetConfigFile(viper.ConfigFileUsed())
