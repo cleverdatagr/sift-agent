@@ -15,7 +15,11 @@
 package cmd
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -31,6 +35,8 @@ import (
 
 // RunAgent is the entry point for the long-running process
 func RunAgent() {
+	initDB() // Initialize SQLite
+
 	if service.Interactive() {
 		fmt.Println("Sift Agent Starting...")
 	} else {
@@ -187,6 +193,20 @@ func handleUpload(remote RemoteConfig, filePath string) {
 		return
 	}
 
+	// DB Check: Has this file been uploaded?
+	// We check ModTime. If ModTime in DB matches File, and Status is UPLOADED or VERIFIED, skip.
+	status, dbModTime, _, errorCount := getFileRecord(filePath)
+	
+	if errorCount > 10 {
+		log.Printf("[%s] Skipping %s: Too many errors (%d). Manual intervention required.", remote.Name, filepath.Base(filePath), errorCount)
+		return
+	}
+
+	if (status == StatusUploaded || status == StatusVerified) && dbModTime == info.ModTime().UnixNano() {
+		log.Printf("[%s] Skipping %s: Already uploaded and unchanged.", remote.Name, filepath.Base(filePath))
+		return
+	}
+
 	// Stability Check (Double-Check)
 	// Some scanners create the file, then pause, then write again.
 	// We check if size remains constant for another 500ms.
@@ -202,10 +222,10 @@ func handleUpload(remote RemoteConfig, filePath string) {
 	log.Printf("[%s] 🚀 Ready to upload: %s (%d bytes)", remote.Name, filepath.Base(filePath), info.Size())
 
 	// Perform HTTP Upload
-	uploadFile(remote, filePath)
+	uploadFile(remote, filePath, info.ModTime().UnixNano())
 }
 
-func uploadFile(remote RemoteConfig, filePath string) {
+func uploadFile(remote RemoteConfig, filePath string, modTime int64) {
 	client := resty.New()
 	
 	// Prepare destination for "done" files
@@ -213,6 +233,20 @@ func uploadFile(remote RemoteConfig, filePath string) {
 	if _, err := os.Stat(doneDir); os.IsNotExist(err) {
 		os.Mkdir(doneDir, 0755)
 	}
+
+	// Calculate Local Checksum
+	f, err := os.Open(filePath)
+	if err != nil {
+		log.Printf("[%s] Read failed: %v", remote.Name, err)
+		return
+	}
+	defer f.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		log.Printf("[%s] Hash failed: %v", remote.Name, err)
+		return
+	}
+	localHash := hex.EncodeToString(hasher.Sum(nil))
 
 	// Retry loop
 	maxRetries := 3
@@ -223,9 +257,30 @@ func uploadFile(remote RemoteConfig, filePath string) {
 			Post(fmt.Sprintf("%s/agent/upload", remote.Endpoint))
 
 		if err == nil && resp.StatusCode() >= 200 && resp.StatusCode() < 300 {
-			log.Printf("[%s] ✅ Upload Success: %s (Response: %s)", remote.Name, filepath.Base(filePath), resp.String())
 			
-			// Move to .done
+			// Parse Response for Handshake
+			var result map[string]interface{}
+			if err := json.Unmarshal(resp.Body(), &result); err == nil {
+				if remoteHash, ok := result["sha256"].(string); ok {
+					if remoteHash == localHash {
+						log.Printf("[%s] ✅ Integrity Verified: %s", remote.Name, filepath.Base(filePath))
+						updateFileStatus(filePath, StatusVerified, localHash, modTime, 0)
+					} else {
+						log.Printf("[%s] ❌ Integrity MISMATCH: %s (Local: %s, Remote: %s)", remote.Name, filepath.Base(filePath), localHash, remoteHash)
+						markCorrupt(filePath)
+						incrementError(filePath)
+						return // Stop processing this file
+					}
+				} else {
+					// Legacy API support (assume success but weak status)
+					log.Printf("[%s] ⚠️ API did not return checksum. Marking as UPLOADED (Weak).", remote.Name)
+					updateFileStatus(filePath, StatusUploaded, localHash, modTime, 0)
+				}
+			}
+
+			log.Printf("[%s] Upload Success: %s", remote.Name, filepath.Base(filePath))
+			
+			// Move to .done (Best Effort)
 			destPath := filepath.Join(doneDir, filepath.Base(filePath))
 			
 			// Handle collisions in .done
@@ -235,7 +290,10 @@ func uploadFile(remote RemoteConfig, filePath string) {
 			}
 
 			if err := os.Rename(filePath, destPath); err != nil {
-				log.Printf("[%s] Warning: Failed to move file to .done: %v", remote.Name, err)
+				log.Printf("[%s] Note: Failed to move file to .done (Permission Denied?). File remains but is marked VERIFIED.", remote.Name)
+			} else {
+				// If moved, we technically should update the DB path, but for now we just leave the original path marked as VERIFIED
+				// so if it reappears there, we know it's a dupe.
 			}
 			return
 		}
@@ -245,6 +303,7 @@ func uploadFile(remote RemoteConfig, filePath string) {
 	}
 
 	log.Printf("[%s] ❌ Upload Failed after %d attempts: %s", remote.Name, maxRetries, filepath.Base(filePath))
+	incrementError(filePath)
 }
 
 var runCmd = &cobra.Command{
