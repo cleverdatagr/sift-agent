@@ -1,0 +1,13 @@
+Sift Edge Agent
+Copyright 2026 CleverData
+
+This product includes software developed at
+CleverData (https://github.com/cleverdatagr).
+
+This product includes software developed by the following third parties:
+
+* fsnotify (https://github.com/fsnotify/fsnotify) - BSD 3-Clause License
+* go-resty (https://github.com/go-resty/resty) - MIT License
+* service (https://github.com/kardianos/service) - zlib License
+* cobra (https://github.com/spf13/cobra) - Apache License 2.0
+* viper (https://github.com/spf13/viper) - MIT License

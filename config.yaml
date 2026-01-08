@@ -1,0 +1,6 @@
+db_path: ./state.db
+remotes:
+    - name: pod
+      path: C:\Users\s413855\source\repos\docuclass\sift-agent\scans
+      endpoint: http://localhost/api/v1
+      key: sift_live_demo_E9BDR2Z8Zq0tZBlJCkT-SoW9EYUKJT68CHB_OdOVQq4
