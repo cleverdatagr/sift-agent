@@ -1,18 +1,4 @@
-// Copyright 2026 CleverData
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-package cmd
+package db
 
 import (
 	"database/sql"
@@ -22,7 +8,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/spf13/viper"
 	_ "modernc.org/sqlite"
 )
 
@@ -36,44 +21,15 @@ const (
 
 var dbInstance *sql.DB
 
-func initDB() {
-	var dbPath string
-
-	// 1. Explicit Config override
-	if viper.IsSet("db_path") {
-		dbPath = viper.GetString("db_path")
-		if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-			log.Fatalf("Error: Failed to create database directory at %s: %v", filepath.Dir(dbPath), err)
-		}
-	} else if localMode {
-		// 2. Local Mode: Next to EXE
-		exePath, err := os.Executable()
-		if err != nil {
-			log.Fatal("Error: Could not determine executable path")
-		}
-		dbPath = filepath.Join(filepath.Dir(exePath), "state.db")
-	} else {
-		// 3. Global Mode: ProgramData or /var/lib
-		var dataDir string
-		if os.Getenv("OS") == "Windows_NT" {
-			dataDir = filepath.Join(os.Getenv("ProgramData"), "Sift")
-		} else {
-			dataDir = "/var/lib/sift-agent"
-		}
-
-		// Strictly enforce the directory exists or can be created
-		if err := os.MkdirAll(dataDir, 0755); err != nil {
-			fmt.Printf("Error: Could not create data directory at %s\n", dataDir)
-			fmt.Println("Hint: Run as Administrator or use --local for development.")
-			os.Exit(1)
-		}
-		dbPath = filepath.Join(dataDir, "state.db")
+func Init(dbPath string) error {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		return fmt.Errorf("failed to create database directory: %w", err)
 	}
-	
+
 	var err error
 	dbInstance, err = sql.Open("sqlite", dbPath)
 	if err != nil {
-		log.Fatalf("Failed to open database at %s: %v", dbPath, err)
+		return fmt.Errorf("failed to open database at %s: %w", dbPath, err)
 	}
 
 	// Create Table
@@ -90,11 +46,12 @@ func initDB() {
 	);
 	`
 	if _, err := dbInstance.Exec(schema); err != nil {
-		log.Fatalf("Failed to initialize schema: %v", err)
+		return fmt.Errorf("failed to initialize schema: %w", err)
 	}
+	return nil
 }
 
-func getFileRecord(path string) (string, int64, string, int) {
+func GetFileRecord(path string) (string, int64, string, int) {
 	row := dbInstance.QueryRow("SELECT status, mod_time, file_hash, error_count FROM file_log WHERE file_path = ?", path)
 	var status, hash string
 	var modTime int64
@@ -109,7 +66,7 @@ func getFileRecord(path string) (string, int64, string, int) {
 	return status, modTime, hash, errCount
 }
 
-func updateFileStatus(path string, status string, hash string, modTime int64, size int64) {
+func UpdateFileStatus(path string, status string, hash string, modTime int64, size int64) {
 	_, err := dbInstance.Exec(`
 		INSERT INTO file_log (file_path, file_hash, mod_time, file_size, status, last_attempt_at, error_count)
 		VALUES (?, ?, ?, ?, ?, ?, 0)
@@ -127,30 +84,28 @@ func updateFileStatus(path string, status string, hash string, modTime int64, si
 	}
 }
 
-func incrementError(path string) {
+func IncrementError(path string) {
 	_, err := dbInstance.Exec("UPDATE file_log SET error_count = error_count + 1, last_attempt_at = ? WHERE file_path = ?", time.Now(), path)
 	if err != nil {
 		log.Printf("DB Error Increment Failed: %v", err)
 	}
 }
 
-func markCorrupt(path string) {
+func MarkCorrupt(path string) {
 	_, err := dbInstance.Exec("UPDATE file_log SET status = ?, last_attempt_at = ? WHERE file_path = ?", StatusCorrupt, time.Now(), path)
 	if err != nil {
 		log.Printf("DB Mark Corrupt Failed: %v", err)
 	}
 }
 
-func resetHistory(targetPath string) {
-	// If path is provided, only clear that specific file
-	// If empty, clear everything (Nuclear option)
+func ResetHistory(targetPath string) {
 	var err error
 	if targetPath != "" {
 		_, err = dbInstance.Exec("DELETE FROM file_log WHERE file_path = ?", targetPath)
 	} else {
 		_, err = dbInstance.Exec("DELETE FROM file_log")
 	}
-	
+
 	if err != nil {
 		log.Printf("Failed to reset history: %v", err)
 	} else {

@@ -95,7 +95,7 @@ var installCmd = &cobra.Command{
 			return
 		}
 		fmt.Println("Service installed successfully.")
-		
+
 		fmt.Println("Starting service...")
 		if err := s.Start(); err != nil {
 			fmt.Printf("Failed to start: %v\n", err)
@@ -118,7 +118,7 @@ var uninstallCmd = &cobra.Command{
 			fmt.Println(err)
 			return
 		}
-		
+
 		if err := s.Stop(); err != nil {
 			// Ignore stop errors, it might not be running
 		}

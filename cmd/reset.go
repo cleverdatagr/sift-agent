@@ -17,8 +17,12 @@ package cmd
 import (
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 
+	"github.com/cleverdata/sift-agent/internal/db"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var resetPath string
@@ -26,19 +30,35 @@ var resetPath string
 var resetCmd = &cobra.Command{
 	Use:   "reset-history",
 	Short: "Clear the upload history database",
-	Long:  `Clears the local SQLite database that tracks uploaded files. Use this to force the agent to re-upload files it has already processed.`, 
+	Long:  `Clears the local SQLite database that tracks uploaded files. Use this to force the agent to re-upload files it has already processed.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		initDB()
+		// Initialize DB first
+		var dbPath string
+		if viper.IsSet("db_path") {
+			dbPath = viper.GetString("db_path")
+		} else if localMode {
+			exePath, _ := os.Executable()
+			dbPath = filepath.Join(filepath.Dir(exePath), "state.db")
+		} else {
+			var dataDir string
+			if os.Getenv("OS") == "Windows_NT" {
+				dataDir = filepath.Join(os.Getenv("ProgramData"), "Sift")
+			} else {
+				dataDir = "/var/lib/sift-agent"
+			}
+			dbPath = filepath.Join(dataDir, "state.db")
+		}
+		db.Init(dbPath)
+
 		if resetPath != "" {
 			fmt.Printf("Clearing history for: %s\n", resetPath)
 		} else {
 			fmt.Println("⚠️  WARNING: Clearing ENTIRE upload history. All files will be re-uploaded if seen again.")
 			fmt.Println("Press Ctrl+C to cancel in 5 seconds...")
-			// time.Sleep(5 * time.Second) // Uncomment for safety in prod
 		}
-		
-		resetHistory(resetPath)
-		
+
+		db.ResetHistory(resetPath)
+
 		log.Println("Database reset complete.")
 	},
 }

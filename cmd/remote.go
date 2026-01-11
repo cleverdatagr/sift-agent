@@ -20,17 +20,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/cleverdata/sift-agent/internal/config"
 	"github.com/go-resty/resty/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
-
-type RemoteConfig struct {
-	Name     string `mapstructure:"name"`
-	Path     string `mapstructure:"path"`
-	Endpoint string `mapstructure:"endpoint"`
-	Key      string `mapstructure:"key"`
-}
 
 var remoteCmd = &cobra.Command{
 	Use:   "remote",
@@ -40,16 +34,33 @@ var remoteCmd = &cobra.Command{
 var remoteAddCmd = &cobra.Command{
 	Use:   "add",
 	Short: "Add a new folder to watch",
-	Example: `  sift remote add --name invoices --path "C:\Scans\Invoices" --endpoint "https://api.sift.com" --key "sk_..."`,
+	Long: `Adds a local folder to the agent's watch list using a robust pipeline architecture. 
+	
+The agent monitors folders using both real-time events (Watcher) and periodic scans (Poller).
+Files must pass a "Settling Delay" (initial silence) and a "Stability Loop" (final verification) 
+before being uploaded.
+
+Total Verification Time ≈ settling-delay + (stability-threshold * check-interval).
+Stability Timeout = Maximum time to wait for a file to stop changing (default 30m).
+Concurrency Limit = Max simultaneous uploads per folder (default 5).
+Polling Interval  = Frequency of the backup directory scan (default 1m).`,
+	Example: `  sift remote add --name scans --path "C:\Scans" --endpoint "https://api.sift.com" --key "sk_..." --concurrency-limit 10 --settling-delay 10s`,
 	Run: func(cmd *cobra.Command, args []string) {
 		name, _ := cmd.Flags().GetString("name")
 		path, _ := cmd.Flags().GetString("path")
 		endpoint, _ := cmd.Flags().GetString("endpoint")
 		key, _ := cmd.Flags().GetString("key")
 		force, _ := cmd.Flags().GetBool("force")
+		stabilityThreshold, _ := cmd.Flags().GetInt("stability-threshold")
+		checkInterval, _ := cmd.Flags().GetString("check-interval")
+		stabilityTimeout, _ := cmd.Flags().GetString("stability-timeout")
+		concurrencyLimit, _ := cmd.Flags().GetInt("concurrency-limit")
+		pollingInterval, _ := cmd.Flags().GetString("polling-interval")
+		settlingDelay, _ := cmd.Flags().GetString("settling-delay")
+		noFsnotify, _ := cmd.Flags().GetBool("no-fsnotify")
 
-		if name == "" || path == "" || endpoint == "" || key == "" {
-			fmt.Println("Error: --name, --path, --endpoint, and --key are required.")
+		if name == "" || path == "" || key == "" {
+			fmt.Println("Error: --name, --path, and --key are required.")
 			return
 		}
 
@@ -79,7 +90,7 @@ var remoteAddCmd = &cobra.Command{
 				fmt.Printf("❌ Unexpected Response: Status %d - %s\n", resp.StatusCode(), resp.String())
 				return
 			}
-			
+
 			fmt.Println("✅ Connection Verified!")
 		}
 		// -------------------------
@@ -91,9 +102,9 @@ var remoteAddCmd = &cobra.Command{
 		}
 
 		// Load existing remotes
-		var remotes []RemoteConfig
+		var remotes []config.RemoteConfig
 		if err := viper.UnmarshalKey("remotes", &remotes); err != nil {
-			remotes = []RemoteConfig{}
+			remotes = []config.RemoteConfig{}
 		}
 
 		// Check for duplicates
@@ -104,11 +115,18 @@ var remoteAddCmd = &cobra.Command{
 			}
 		}
 
-		newRemote := RemoteConfig{
-			Name:     name,
-			Path:     absPath,
-			Endpoint: endpoint,
-			Key:      key,
+		newRemote := config.RemoteConfig{
+			Name:               name,
+			Path:               absPath,
+			Endpoint:           endpoint,
+			Key:                key,
+			StabilityThreshold: stabilityThreshold,
+			CheckInterval:      checkInterval,
+			StabilityTimeout:   stabilityTimeout,
+			ConcurrencyLimit:   concurrencyLimit,
+			PollingInterval:    pollingInterval,
+			SettlingDelay:      settlingDelay,
+			DisableFsnotify:    noFsnotify,
 		}
 
 		remotes = append(remotes, newRemote)
@@ -136,18 +154,24 @@ var remoteAddCmd = &cobra.Command{
 
 			os.MkdirAll(targetDir, 0755)
 			viper.SetConfigFile(filepath.Join(targetDir, "config.yaml"))
-			
+
 			if err := viper.SafeWriteConfig(); err != nil {
 				fmt.Printf("Failed to create config: %v\n", err)
 				return
 			}
 		}
 
-		fmt.Printf("Remote '%s' added successfully. Watching: %s\n", name, absPath)
-		fmt.Println("\n>>> IMPORTANT: Run 'sift restart' to apply these changes to the running service.") 
-	},
-}
-
+				fmt.Printf("Remote '%s' added successfully. Watching: %s\n", name, absPath)
+				fmt.Printf("Policy: %d checks @ %s | Max Wait: %s | Workers: %d | Polling: %s | Settling: %s\n", 
+					stabilityThreshold, checkInterval, stabilityTimeout, concurrencyLimit, pollingInterval, settlingDelay)
+				if noFsnotify {
+					fmt.Println("Mode: POLLING ONLY (Real-time events disabled)")
+				} else {
+					fmt.Println("Mode: REAL-TIME (fsnotify) + Polling Backup")
+				}
+				fmt.Println("\n>>> IMPORTANT: Run 'sift restart' to apply these changes to the running service.") 
+			},
+		}
 func checkIfAdmin() bool {
 	// Simple Windows-only check for Admin rights
 	_, err := os.Open("\\\\.\\PHYSICALDRIVE0")
@@ -159,7 +183,7 @@ var remoteListCmd = &cobra.Command{
 	Aliases: []string{"list"},
 	Short:   "List configured remotes",
 	Run: func(cmd *cobra.Command, args []string) {
-		var remotes []RemoteConfig
+		var remotes []config.RemoteConfig
 		viper.UnmarshalKey("remotes", &remotes)
 
 		if len(remotes) == 0 {
@@ -183,14 +207,14 @@ var remoteRemoveCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		name := args[0]
 
-		var remotes []RemoteConfig
+		var remotes []config.RemoteConfig
 		if err := viper.UnmarshalKey("remotes", &remotes); err != nil {
 			fmt.Println("No remotes configured.")
 			return
 		}
 
 		found := false
-		var updatedRemotes []RemoteConfig
+		var updatedRemotes []config.RemoteConfig
 		for _, r := range remotes {
 			if r.Name == name {
 				found = true
@@ -218,9 +242,16 @@ var remoteRemoveCmd = &cobra.Command{
 func init() {
 	remoteAddCmd.Flags().String("name", "", "Unique name for this watcher")
 	remoteAddCmd.Flags().String("path", "", "Local folder path to watch")
-	remoteAddCmd.Flags().String("endpoint", "", "API Endpoint URL (e.g. https://api.sift.com/api/v1)")
+	remoteAddCmd.Flags().String("endpoint", "https://sift.cleverdata.gr/api/v1", "API Endpoint URL")
 	remoteAddCmd.Flags().String("key", "", "API Key (Secret)")
 	remoteAddCmd.Flags().Bool("force", false, "Skip connection verification")
+	remoteAddCmd.Flags().Int("stability-threshold", 3, "Number of consecutive checks that must pass (default: 3)")
+	remoteAddCmd.Flags().String("check-interval", "5s", "Time to wait between checks (default: 5s)")
+	remoteAddCmd.Flags().String("stability-timeout", "30m", "Maximum time to wait for stability (default: 30m)")
+	remoteAddCmd.Flags().Int("concurrency-limit", 5, "Maximum number of simultaneous uploads (default: 5)")
+	remoteAddCmd.Flags().String("polling-interval", "1m", "Interval for the backup scan (default: 1m)")
+	remoteAddCmd.Flags().String("settling-delay", "5s", "Wait for silence before verification starts (default: 5s)")
+	remoteAddCmd.Flags().Bool("no-fsnotify", false, "Disable real-time filesystem events (rely purely on polling)")
 
 	remoteCmd.AddCommand(remoteAddCmd)
 	remoteCmd.AddCommand(remoteListCmd)

@@ -25,7 +25,8 @@ import (
 
 var cfgFile string
 var localMode bool
-var Version = "0.1.1" // Default version
+var debugMode bool
+var Version = "0.2.0" // Default version
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -46,6 +47,7 @@ func init() {
 	cobra.OnInitialize(initConfig)
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file path")
 	rootCmd.PersistentFlags().BoolVar(&localMode, "local", false, "force use of local directory for config and database")
+	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "enable excessive debug logging")
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -84,7 +86,7 @@ func initConfig() {
 		viper.AddConfigPath(globalDir)
 		viper.SetConfigName("config")
 		viper.SetConfigType("yaml")
-		
+
 		// If we are in Global Mode but no config exists, we should set the default file path
 		// so that 'viper.WriteConfig()' creates it in the right place.
 		viper.SetConfigFile(filepath.Join(globalDir, "config.yaml"))
